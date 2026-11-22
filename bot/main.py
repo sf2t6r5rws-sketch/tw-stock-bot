@@ -435,6 +435,7 @@ def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
         tech_ok = False
         WARNINGS.append("歷史股價抓不到，今天的候選名單沒有經過均線與均量篩選")
 
+    funnel = {"checked": len(df), "history": 0, "ma60": 0, "rising": 0, "ma20": 0, "volume": 0}
     for code, r in df.iterrows():
         info = {"code": code, "name": r["name"], "close": r["close"], "pe": r["pe"],
                 "yield": r["yield"], "pb": r["pb"], "held": code in held, "notes": []}
@@ -442,6 +443,7 @@ def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
         if need_tech and tech_ok:
             if h is None or len(h) < 80:
                 continue
+            funnel["history"] += 1
             close = h["Close"]
             ma20 = close.rolling(20).mean()
             ma60 = close.rolling(60).mean()
@@ -451,19 +453,23 @@ def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
             px = float(r["close"])
             if sc.get("above_ma60") and px <= last_ma60:
                 continue
+            funnel["ma60"] += 1
             if sc.get("ma60_rising") and last_ma60 <= prev_ma60:
                 continue
+            funnel["rising"] += 1
             if sc.get("max_above_ma20_pct") is not None and px > last_ma20 * (1 + float(sc["max_above_ma20_pct"]) / 100):
                 continue
+            funnel["ma20"] += 1
             if sc.get("min_avg_volume_lots_20d") and avg_vol < float(sc["min_avg_volume_lots_20d"]):
                 continue
+            funnel["volume"] += 1
             info["dist_ma20"] = (px / last_ma20 - 1) * 100
             info["avg_vol"] = avg_vol
         results.append(info)
 
     results.sort(key=lambda x: (-(x["yield"] if not math.isnan(x["yield"]) else 0)))
     return {"results": results[: int(sc.get("top_n", 15))], "total_matched": len(results),
-            "prefiltered": prefiltered, "tech_ok": tech_ok and need_tech}
+            "prefiltered": prefiltered, "tech_ok": tech_ok and need_tech, "funnel": funnel}
 
 
 # ---------------------------------------------------------------- 訊息
@@ -489,6 +495,9 @@ def build_message(trade_date: date, port: dict, watch: list[str], scan: dict | N
         out.append(f"【市場掃描】符合條件 {scan['total_matched']} 檔（基本面初選 {scan['prefiltered']} 檔）")
         if not scan["results"]:
             out.append("今天沒有符合全部條件的股票")
+        f = scan.get("funnel")
+        if f and scan.get("tech_ok"):
+            out.append(f"篩選過程：取殖利率前 {f['checked']} 檔 → 有歷史股價 {f['history']} → 站上季線 {f['ma60']} → 季線上彎 {f['rising']} → 未追高 {f['ma20']} → 均量足夠 {f['volume']}")
         for i, r in enumerate(scan["results"], 1):
             extra = f"，距月線 {pct(r['dist_ma20'])}" if "dist_ma20" in r else ""
             held = "（已持有）" if r["held"] else ""
