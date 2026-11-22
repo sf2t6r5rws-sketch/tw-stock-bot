@@ -1,0 +1,44 @@
+name: 每日盤後分析
+
+on:
+  schedule:
+    - cron: "0 11 * * 1-5"   # 週一到週五 台灣時間 19:00（GitHub 可能延遲幾分鐘到一小時）
+  workflow_dispatch:          # 可在 Actions 頁面手動執行
+    inputs:
+      force:
+        description: "休市日也強制執行（測試用）"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 盤後分析
+        run: python bot/main.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE_RUN: ${{ github.event.inputs.force || 'false' }}
+
+      - name: 儲存紀錄
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state reports
+          git diff --cached --quiet || git commit -m "盤後紀錄 $(TZ=Asia/Taipei date +%F)"
+          git push
