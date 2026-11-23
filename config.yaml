@@ -72,3 +72,18 @@ scan:
 
   prefilter_limit: 150       # 基本面初選後最多取幾檔再算技術面
   top_n: 15                  # 通知裡最多列幾檔
+
+
+# ---------- 四、B 跌深觀察名單 ----------
+# 專找估值便宜、從高點跌深、開始止穩的股票；風險比 A 名單高
+# 價格、成交量、ETF、類股等範圍沿用上面 scan 的設定
+
+scan_dip:
+  enabled: true
+  yield_min: 5                 # 殖利率下限（%）
+  pe_max: 12                   # 本益比上限
+  pb_max: 1.5                  # 股價淨值比上限
+  min_drop_from_high_pct: 20   # 距近 60 日最高點至少跌幾 %
+  no_new_low_days: 5           # 最近幾天內沒有再創 60 日新低
+  min_avg_volume_lots_20d: 500 # 近 20 日平均成交量至少幾張
+  top_n: 10                    # 通知裡最多列幾檔
