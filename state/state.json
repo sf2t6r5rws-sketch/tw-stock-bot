@@ -1,15 +1,17 @@
 {
-  "units": 1034.55,
+  "units": 1062.31,
   "peak_nav": 102.68329225267024,
-  "applied_flows": [],
+  "applied_flows": [
+    "2026-11-23|2776|出清聯鈞、晶技（計畫外舊持股）"
+  ],
   "alert": {
     "level": 0,
     "dd": 0.0
   },
-  "last_date": "2026-11-20",
+  "last_date": "2026-11-23",
   "base": {
     "units": 1034.55,
-    "peak_nav": 100.0,
+    "peak_nav": 102.68329225267024,
     "applied_flows": [],
     "alert": {
       "level": 0,
