@@ -1,11 +1,20 @@
 {
   "units": 1034.55,
-  "peak_nav": 100.0,
+  "peak_nav": 102.68329225267024,
   "applied_flows": [],
   "alert": {
     "level": 0,
     "dd": 0.0
   },
   "last_date": "2026-11-20",
-  "base": {}
+  "base": {
+    "units": 1034.55,
+    "peak_nav": 100.0,
+    "applied_flows": [],
+    "alert": {
+      "level": 0,
+      "dd": 0.0
+    },
+    "last_date": "2026-11-20"
+  }
 }
