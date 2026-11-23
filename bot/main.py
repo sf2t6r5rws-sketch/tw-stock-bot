@@ -399,8 +399,18 @@ def check_watchlist(cfg: dict, market: pd.DataFrame) -> list[str]:
 
 # ---------------------------------------------------------------- 全市場掃描
 
-def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
-    sc = cfg.get("scan", {}) or {}
+HIST_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def get_history(tickers: dict[str, str]) -> dict[str, pd.DataFrame]:
+    """有快取的歷史股價，兩份名單共用，避免重複下載"""
+    need = {c: m for c, m in tickers.items() if c not in HIST_CACHE}
+    if need:
+        HIST_CACHE.update(load_history(need))
+    return {c: HIST_CACHE[c] for c in tickers if c in HIST_CACHE}
+
+
+def base_universe(sc: dict, market: pd.DataFrame) -> pd.DataFrame:
     df = market.copy()
     df = df[~df["close"].isna()]
 
@@ -415,6 +425,12 @@ def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
 
     df = df[(df["close"] >= float(sc.get("min_price", 0))) & (df["close"] <= float(sc.get("max_price", 1e9)))]
     df = df[df["volume"] >= float(sc.get("min_volume_lots_today", 0)) * 1000]
+    return df
+
+
+def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
+    sc = cfg.get("scan", {}) or {}
+    df = base_universe(sc, market)
 
     if sc.get("pe_max") is not None:
         df = df[(df["pe"] > 0) & (df["pe"] <= float(sc["pe_max"]))]
@@ -430,7 +446,7 @@ def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
                      sc.get("max_above_ma20_pct") is not None, sc.get("min_avg_volume_lots_20d")])
     tech_ok = True
     results = []
-    hist = load_history({c: df.at[c, "market"] for c in df.index}) if need_tech and len(df) else {}
+    hist = get_history({c: df.at[c, "market"] for c in df.index}) if need_tech and len(df) else {}
     if need_tech and len(df) and not hist:
         tech_ok = False
         WARNINGS.append("歷史股價抓不到，今天的候選名單沒有經過均線與均量篩選")
@@ -472,9 +488,67 @@ def scan_market(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict:
             "prefiltered": prefiltered, "tech_ok": tech_ok and need_tech, "funnel": funnel}
 
 
+def scan_dip(cfg: dict, market: pd.DataFrame, held: set[str]) -> dict | None:
+    """跌深觀察名單：估值便宜、從高點跌深、開始止穩"""
+    sc = cfg.get("scan", {}) or {}
+    dc = cfg.get("scan_dip", {}) or {}
+    if not dc.get("enabled", False):
+        return None
+    df = base_universe(sc, market)
+    df = df[(df["pe"] > 0) & (df["pe"] <= float(dc.get("pe_max", 12)))]
+    df = df[df["yield"] >= float(dc.get("yield_min", 5))]
+    df = df[(df["pb"] > 0) & (df["pb"] <= float(dc.get("pb_max", 1.5)))]
+    prefiltered = len(df)
+    df = df.sort_values("yield", ascending=False).head(int(sc.get("prefilter_limit", 150)))
+
+    hist = get_history({c: df.at[c, "market"] for c in df.index}) if len(df) else {}
+    if len(df) and not hist:
+        WARNINGS.append("歷史股價抓不到，今天沒有跌深觀察名單")
+        return {"results": [], "total_matched": 0, "prefiltered": prefiltered, "funnel": None}
+
+    min_drop = float(dc.get("min_drop_from_high_pct", 20))
+    days = int(dc.get("no_new_low_days", 5))
+    min_vol = float(dc.get("min_avg_volume_lots_20d", 500))
+    funnel = {"checked": len(df), "history": 0, "drop": 0, "no_low": 0, "ma5": 0, "volume": 0}
+    results = []
+    for code, r in df.iterrows():
+        h = hist.get(code)
+        if h is None or len(h) < 65:
+            continue
+        funnel["history"] += 1
+        close = h["Close"].astype(float)
+        px = float(r["close"])
+        last60 = close.tail(60)
+        high60 = float(last60.max())
+        drop = (1 - px / high60) * 100
+        if drop < min_drop:
+            continue
+        funnel["drop"] += 1
+        low_pos = int(last60.values.argmin())          # 60 日最低點出現的位置
+        if low_pos >= len(last60) - days:              # 最低點在最近幾天內 = 還在創新低
+            continue
+        funnel["no_low"] += 1
+        ma5 = float(close.tail(5).mean())
+        if px < ma5:
+            continue
+        funnel["ma5"] += 1
+        avg_vol = float(h["Volume"].tail(20).mean()) / 1000
+        if avg_vol < min_vol:
+            continue
+        funnel["volume"] += 1
+        results.append({"code": code, "name": r["name"], "close": px, "pe": r["pe"], "yield": r["yield"],
+                        "pb": r["pb"], "held": code in held, "drop": drop,
+                        "off_low": (px / float(last60.min()) - 1) * 100})
+
+    results.sort(key=lambda x: -x["yield"])
+    return {"results": results[: int(dc.get("top_n", 10))], "total_matched": len(results),
+            "prefiltered": prefiltered, "funnel": funnel}
+
+
 # ---------------------------------------------------------------- 訊息
 
-def build_message(trade_date: date, port: dict, watch: list[str], scan: dict | None) -> str:
+def build_message(trade_date: date, port: dict, watch: list[str], scan: dict | None,
+                  dip: dict | None = None) -> str:
     out = [f"📊 盤後日報 {trade_date.isoformat()}", ""]
 
     out.append("【需要處理】")
@@ -492,7 +566,7 @@ def build_message(trade_date: date, port: dict, watch: list[str], scan: dict | N
         out.append("")
 
     if scan is not None:
-        out.append(f"【市場掃描】符合條件 {scan['total_matched']} 檔（基本面初選 {scan['prefiltered']} 檔）")
+        out.append(f"【A 趨勢名單】符合條件 {scan['total_matched']} 檔（基本面初選 {scan['prefiltered']} 檔）")
         if not scan["results"]:
             out.append("今天沒有符合全部條件的股票")
         f = scan.get("funnel")
@@ -502,6 +576,22 @@ def build_message(trade_date: date, port: dict, watch: list[str], scan: dict | N
             extra = f"，距月線 {pct(r['dist_ma20'])}" if "dist_ma20" in r else ""
             held = "（已持有）" if r["held"] else ""
             out.append(f"{i}. {r['code']} {r['name']}{held} 收 {num(r['close'])}｜殖利率 {num(r['yield'], 1)}%｜本益比 {num(r['pe'], 1)}｜淨值比 {num(r['pb'], 2)}{extra}")
+        out.append("")
+
+    if dip is not None:
+        out.append(f"【B 跌深觀察名單】符合條件 {dip['total_matched']} 檔（便宜股初選 {dip['prefiltered']} 檔）")
+        if not dip["results"]:
+            out.append("今天沒有跌深且止穩的股票")
+        f = dip.get("funnel")
+        if f:
+            out.append(f"篩選過程：取殖利率前 {f['checked']} 檔 → 有歷史股價 {f['history']} → 跌幅夠深 {f['drop']} → 未再創低 {f['no_low']} → 站上5日線 {f['ma5']} → 均量足夠 {f['volume']}")
+        for i, r in enumerate(dip["results"], 1):
+            held = "（已持有）" if r["held"] else ""
+            out.append(f"{i}. {r['code']} {r['name']}{held} 收 {num(r['close'])}｜殖利率 {num(r['yield'], 1)}%｜本益比 {num(r['pe'], 1)}｜距高點 -{r['drop']:.0f}%｜離低點 {pct(r['off_low'])}")
+        out.append("⚠️ B 名單風險較高：止穩可能失效，殖利率與本益比是過去數字，小心價值陷阱。")
+        out.append("")
+
+    if scan is not None or dip is not None:
         out.append("候選只是研究清單：依計畫書第五章寫好買進理由與出場條件後才可下單。")
         out.append("")
 
@@ -563,8 +653,9 @@ def main() -> None:
     port = check_portfolio(cfg, market, trade_date, state)
     watch = check_watchlist(cfg, market)
     scan = scan_market(cfg, market, port["held"]) if (cfg.get("scan") or {}).get("enabled", True) else None
+    dip = scan_dip(cfg, market, port["held"])
 
-    text = build_message(trade_date, port, watch, scan)
+    text = build_message(trade_date, port, watch, scan, dip)
     print(text)
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
